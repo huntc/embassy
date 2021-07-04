@@ -522,6 +522,18 @@ impl<T, const N: usize> Channel<T, N> {
     }
 
     fn set_senders_waker<'cs>(&mut self, _cs: CriticalSection<'cs>, senders_waker: Waker) {
+        // Dispose of any existing sender, causing them to poll again.
+        // This could cause a spin given multiple concurrent senders, however given that
+        // most sends only block waiting for the receiver to become active, this should
+        // be a short-lived activity. The upside is a greatly simplified implementation
+        // that avoids the need for intrusive linked-lists and unsafe operations on pinned
+        // pointers.
+        if let Some(waker) = self.senders_waker.clone() {
+            if !senders_waker.will_wake(&waker) {
+                trace!("Waking an an active send waker due to being superseded with a new one. While benign, please report this.");
+                waker.wake();
+            }
+        }
         self.senders_waker = Some(senders_waker);
     }
 
@@ -729,18 +741,23 @@ mod tests {
     }
 
     #[futures_test::test]
-    async fn sender_send_waits_until_capacity() {
+    async fn senders_sends_wait_until_capacity() {
         let executor = ThreadPool::new().unwrap();
 
         static mut CHANNEL: Channel<u32, 1> = Channel::new();
-        let (s, mut r) = split(unsafe { &mut CHANNEL });
-        assert!(s.try_send(1).is_ok());
-        let send_task = executor.spawn_with_handle(async move { s.send(2).await });
+        let (s0, mut r) = split(unsafe { &mut CHANNEL });
+        assert!(s0.try_send(1).is_ok());
+        let s1 = s0.clone();
+        let send_task_1 = executor.spawn_with_handle(async move { s0.send(2).await });
+        let send_task_2 = executor.spawn_with_handle(async move { s1.send(3).await });
         // Wish I could think of a means of determining that the async send is waiting instead.
         // However, I've used the debugger to observe that the send does indeed wait.
         assert!(Delay::new(Duration::from_millis(500)).await.is_ok());
         assert_eq!(r.recv().await, Some(1));
-        assert!(send_task.unwrap().await.is_ok());
+        assert!(r.recv().await.is_some());
+        assert!(r.recv().await.is_some());
+        assert!(send_task_1.unwrap().await.is_ok());
+        assert!(send_task_2.unwrap().await.is_ok());
     }
 
     #[futures_test::test]
