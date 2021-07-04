@@ -540,6 +540,7 @@ impl<T, const N: usize> Channel<T, N> {
     fn wake_senders<'cs>(&mut self, _cs: CriticalSection<'cs>) {
         if let Some(waker) = self.senders_waker.clone() {
             waker.wake();
+            self.senders_waker = None;
         }
     }
 }
