@@ -38,6 +38,7 @@
 //!
 //! This channel and its associated types were derived from https://docs.rs/tokio/0.1.22/tokio/sync/mpsc/fn.channel.html
 
+use core::borrow::BorrowMut;
 use core::cell::UnsafeCell;
 use core::fmt;
 use core::marker::PhantomData;
@@ -50,29 +51,51 @@ use core::task::Waker;
 use critical_section::CriticalSection;
 use futures::Future;
 
+use super::CriticalSectionMutex;
+use super::Mutex;
+use super::ThreadModeMutex;
+
 /// Send values to the associated `Receiver`.
 ///
 /// Instances are created by the [`channel`](channel) function.
-pub struct Sender<'ch, T, const N: usize> {
-    channel: *mut Channel<T, N>,
+pub struct Sender<'ch, M, T, const N: usize>
+where
+    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+{
+    channel: *mut Channel<M, T, N>,
     phantom_data: &'ch PhantomData<T>,
 }
 
 // Safe to pass the sender around
-unsafe impl<'ch, T, const N: usize> Send for Sender<'ch, T, N> {}
-unsafe impl<'ch, T, const N: usize> Sync for Sender<'ch, T, N> {}
+unsafe impl<'ch, M, T, const N: usize> Send for Sender<'ch, M, T, N> where
+    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>
+{
+}
+unsafe impl<'ch, M, T, const N: usize> Sync for Sender<'ch, M, T, N> where
+    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>
+{
+}
 
 /// Receive values from the associated `Sender`.
 ///
 /// Instances are created by the [`channel`](channel) function.
-pub struct Receiver<'ch, T, const N: usize> {
-    channel: *mut Channel<T, N>,
+pub struct Receiver<'ch, M, T, const N: usize>
+where
+    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+{
+    channel: *mut Channel<M, T, N>,
     _phantom_data: &'ch PhantomData<T>,
 }
 
 // Safe to pass the receiver around
-unsafe impl<'ch, T, const N: usize> Send for Receiver<'ch, T, N> {}
-unsafe impl<'ch, T, const N: usize> Sync for Receiver<'ch, T, N> {}
+unsafe impl<'ch, M, T, const N: usize> Send for Receiver<'ch, M, T, N> where
+    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>
+{
+}
+unsafe impl<'ch, M, T, const N: usize> Sync for Receiver<'ch, M, T, N> where
+    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>
+{
+}
 
 /// Splits a bounded mpsc channel into a `Sender` and `Receiver`.
 ///
@@ -93,13 +116,16 @@ unsafe impl<'ch, T, const N: usize> Sync for Receiver<'ch, T, N> {}
 /// use embassy::util::mpsc;
 ///
 /// let (sender, receiver) = {
-///    let mut channel = mpsc::Channel::<u32, 3>::new();
+///    let mut channel = mpsc::Channel::<ThreadModeMutex, u32, 3>::new();
 ///     mpsc::split(&mut channel)
 /// };
 /// ```
-pub fn split<'ch, T, const N: usize>(
-    channel: &'ch mut Channel<T, N>,
-) -> (Sender<'ch, T, N>, Receiver<'ch, T, N>) {
+pub fn split<'ch, M, T, const N: usize>(
+    channel: &'ch mut Channel<M, T, N>,
+) -> (Sender<'ch, M, T, N>, Receiver<'ch, M, T, N>)
+where
+    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+{
     let sender = Sender {
         channel,
         phantom_data: &PhantomData,
@@ -109,11 +135,14 @@ pub fn split<'ch, T, const N: usize>(
         _phantom_data: &PhantomData,
     };
     channel.register_receiver();
-    critical_section::with(|cs| channel.register_sender(cs));
+    channel.register_sender();
     (sender, receiver)
 }
 
-impl<'ch, T, const N: usize> Receiver<'ch, T, N> {
+impl<'ch, M, T, const N: usize> Receiver<'ch, M, T, N>
+where
+    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+{
     /// Receives the next value for this receiver.
     ///
     /// This method returns `None` if the channel has been closed and there are
@@ -139,7 +168,7 @@ impl<'ch, T, const N: usize> Receiver<'ch, T, N> {
     /// This method will either receive a message from the channel immediately or return an error
     /// if the channel is empty.
     pub fn try_recv(&self) -> Result<T, TryRecvError> {
-        critical_section::with(|cs| unsafe { self.channel.as_mut().unwrap().try_recv(cs) })
+        unsafe { self.channel.as_mut().unwrap().try_recv() }
     }
 
     /// Closes the receiving half of a channel without dropping it.
@@ -153,11 +182,14 @@ impl<'ch, T, const N: usize> Receiver<'ch, T, N> {
     /// until those are released.
     ///
     pub fn close(&mut self) {
-        critical_section::with(|cs| unsafe { self.channel.as_mut().unwrap().close(cs) })
+        unsafe { self.channel.as_mut().unwrap().close() }
     }
 }
 
-impl<'ch, T, const N: usize> Future for Receiver<'ch, T, N> {
+impl<'ch, M, T, const N: usize> Future for Receiver<'ch, M, T, N>
+where
+    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+{
     type Output = Option<T>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -165,27 +197,31 @@ impl<'ch, T, const N: usize> Future for Receiver<'ch, T, N> {
             Ok(v) => Poll::Ready(Some(v)),
             Err(TryRecvError::Closed) => Poll::Ready(None),
             Err(TryRecvError::Empty) => {
-                critical_section::with(|cs| unsafe {
+                unsafe {
                     self.channel
                         .as_mut()
                         .unwrap()
-                        .set_receiver_waker(cs, cx.waker().clone());
-                });
+                        .set_receiver_waker(cx.waker().clone());
+                };
                 Poll::Pending
             }
         }
     }
 }
 
-impl<'ch, T, const N: usize> Drop for Receiver<'ch, T, N> {
+impl<'ch, M, T, const N: usize> Drop for Receiver<'ch, M, T, N>
+where
+    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+{
     fn drop(&mut self) {
-        critical_section::with(|cs| unsafe {
-            self.channel.as_mut().unwrap().deregister_receiver(cs)
-        })
+        unsafe { self.channel.as_mut().unwrap().deregister_receiver() }
     }
 }
 
-impl<'ch, T, const N: usize> Sender<'ch, T, N> {
+impl<'ch, M, T, const N: usize> Sender<'ch, M, T, N>
+where
+    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+{
     /// Sends a value, waiting until there is capacity.
     ///
     /// A successful send occurs when it is determined that the other end of the
@@ -233,7 +269,7 @@ impl<'ch, T, const N: usize> Sender<'ch, T, N> {
     /// [`channel`]: channel
     /// [`close`]: Receiver::close
     pub fn try_send(&self, message: T) -> Result<(), TrySendError<T>> {
-        critical_section::with(|cs| unsafe { self.channel.as_mut().unwrap().try_send(message, cs) })
+        unsafe { self.channel.as_mut().unwrap().try_send(message) }
     }
 
     /// Completes when the receiver has dropped.
@@ -254,16 +290,22 @@ impl<'ch, T, const N: usize> Sender<'ch, T, N> {
     /// [`Receiver`]: crate::sync::mpsc::Receiver
     /// [`Receiver::close`]: crate::sync::mpsc::Receiver::close
     pub fn is_closed(&self) -> bool {
-        critical_section::with(|cs| unsafe { self.channel.as_mut().unwrap().is_closed(cs) })
+        unsafe { self.channel.as_mut().unwrap().is_closed() }
     }
 }
 
-struct SendFuture<'ch, T, const N: usize> {
-    sender: Sender<'ch, T, N>,
+struct SendFuture<'ch, M, T, const N: usize>
+where
+    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+{
+    sender: Sender<'ch, M, T, N>,
     message: UnsafeCell<T>,
 }
 
-impl<'ch, T, const N: usize> Future for SendFuture<'ch, T, N> {
+impl<'ch, M, T, const N: usize> Future for SendFuture<'ch, M, T, N>
+where
+    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+{
     type Output = Result<(), SendError<T>>;
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
@@ -271,13 +313,13 @@ impl<'ch, T, const N: usize> Future for SendFuture<'ch, T, N> {
             Ok(..) => Poll::Ready(Ok(())),
             Err(TrySendError::Closed(m)) => Poll::Ready(Err(SendError(m))),
             Err(TrySendError::Full(..)) => {
-                critical_section::with(|cs| unsafe {
+                unsafe {
                     self.sender
                         .channel
                         .as_mut()
                         .unwrap()
-                        .set_senders_waker(cs, cx.waker().clone());
-                });
+                        .set_senders_waker(cx.waker().clone());
+                };
                 Poll::Pending
                 // Note we leave the existing UnsafeCell contents - they still
                 // contain the original message. We could create another UnsafeCell
@@ -287,38 +329,50 @@ impl<'ch, T, const N: usize> Future for SendFuture<'ch, T, N> {
     }
 }
 
-struct CloseFuture<'ch, T, const N: usize> {
-    sender: Sender<'ch, T, N>,
+struct CloseFuture<'ch, M, T, const N: usize>
+where
+    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+{
+    sender: Sender<'ch, M, T, N>,
 }
 
-impl<'ch, T, const N: usize> Future for CloseFuture<'ch, T, N> {
+impl<'ch, M, T, const N: usize> Future for CloseFuture<'ch, M, T, N>
+where
+    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+{
     type Output = ();
 
     fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
         if self.sender.is_closed() {
             Poll::Ready(())
         } else {
-            critical_section::with(|cs| unsafe {
+            unsafe {
                 self.sender
                     .channel
                     .as_mut()
                     .unwrap()
-                    .set_senders_waker(cs, cx.waker().clone());
-            });
+                    .set_senders_waker(cx.waker().clone());
+            };
             Poll::Pending
         }
     }
 }
 
-impl<'ch, T, const N: usize> Drop for Sender<'ch, T, N> {
+impl<'ch, M, T, const N: usize> Drop for Sender<'ch, M, T, N>
+where
+    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+{
     fn drop(&mut self) {
-        critical_section::with(|cs| unsafe { self.channel.as_mut().unwrap().deregister_sender(cs) })
+        unsafe { self.channel.as_mut().unwrap().deregister_sender() }
     }
 }
 
-impl<'ch, T, const N: usize> Clone for Sender<'ch, T, N> {
+impl<'ch, M, T, const N: usize> Clone for Sender<'ch, M, T, N>
+where
+    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+{
     fn clone(&self) -> Self {
-        critical_section::with(|cs| unsafe { self.channel.as_mut().unwrap().register_sender(cs) });
+        unsafe { self.channel.as_mut().unwrap().register_sender() };
         Sender {
             channel: self.channel,
             phantom_data: self.phantom_data,
@@ -374,15 +428,7 @@ impl<T> fmt::Display for TrySendError<T> {
     }
 }
 
-/// A a bounded mpsc channel for communicating between asynchronous tasks
-/// with backpressure.
-///
-/// The channel will buffer up to the provided number of messages.  Once the
-/// buffer is full, attempts to `send` new messages will wait until a message is
-/// received from the channel.
-///
-/// All data sent will become available in the same order as it was sent.
-pub struct Channel<T, const N: usize> {
+pub struct ChannelState<T, const N: usize> {
     buf: [MaybeUninit<UnsafeCell<T>>; N],
     read_pos: usize,
     write_pos: usize,
@@ -395,20 +441,10 @@ pub struct Channel<T, const N: usize> {
     senders_waker: Option<Waker>,
 }
 
-impl<T, const N: usize> Channel<T, N> {
+impl<T, const N: usize> ChannelState<T, N> {
     const INIT: MaybeUninit<UnsafeCell<T>> = MaybeUninit::uninit();
 
-    /// Establish a new bounded channel e.g.:
-    ///
-    /// ```
-    /// use embassy::util::mpsc;
-    ///
-    /// // Declare a bounded channel of 3 u32s.
-    /// let mut channel = mpsc::Channel::<u32, 3>::new();
-    /// // once we have a channel, obtain its sender and receiver
-    /// let (sender, receiver) = mpsc::split(&mut channel);
-    /// ```
-    pub const fn new() -> Self {
+    const fn new() -> Self {
         let buf = [Self::INIT; N];
         let read_pos = 0;
         let write_pos = 0;
@@ -419,7 +455,7 @@ impl<T, const N: usize> Channel<T, N> {
         let senders_registered = 0;
         let receiver_waker = None;
         let senders_waker = None;
-        Channel {
+        ChannelState {
             buf,
             read_pos,
             write_pos,
@@ -432,116 +468,214 @@ impl<T, const N: usize> Channel<T, N> {
             senders_waker,
         }
     }
+}
 
-    fn try_recv<'cs>(&mut self, cs: CriticalSection<'cs>) -> Result<T, TryRecvError> {
-        if !self.closed {
-            if self.read_pos != self.write_pos || self.full {
-                if self.full {
-                    self.full = false;
-                    self.wake_senders(cs);
+/// A a bounded mpsc channel for communicating between asynchronous tasks
+/// with backpressure.
+///
+/// The channel will buffer up to the provided number of messages.  Once the
+/// buffer is full, attempts to `send` new messages will wait until a message is
+/// received from the channel.
+///
+/// All data sent will become available in the same order as it was sent.
+pub struct Channel<M, T, const N: usize>
+where
+    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+{
+    mutex: M,
+}
+
+pub type WithCriticalSections<T, const N: usize> =
+    CriticalSectionMutex<UnsafeCell<ChannelState<T, N>>>;
+
+impl<T, const N: usize> Channel<CriticalSectionMutex<UnsafeCell<ChannelState<T, N>>>, T, N> {
+    /// Establish a new bounded channel using critical sections. Critical sections
+    /// should be used only single core targets where communication is required
+    /// from exception mode e.g. interrupt handlers. To create one:
+    ///
+    /// ```
+    /// use embassy::util::mpsc;
+    ///
+    /// // Declare a bounded channel of 3 u32s.
+    /// let mut channel = mpsc::Channel::<u32, 3>::with_critical_sections();
+    /// // once we have a channel, obtain its sender and receiver
+    /// let (sender, receiver) = mpsc::split(&mut channel);
+    /// ```
+    pub const fn with_critical_sections() -> Self {
+        let mutex = CriticalSectionMutex::new(UnsafeCell::new(ChannelState::new()));
+        Channel { mutex }
+    }
+}
+
+pub type WithThreadModeOnly<T, const N: usize> = ThreadModeMutex<UnsafeCell<ChannelState<T, N>>>;
+
+impl<T, const N: usize> Channel<ThreadModeMutex<UnsafeCell<ChannelState<T, N>>>, T, N> {
+    /// Establish a new bounded channel for use in Cortex-M thread mode. Thread
+    /// mode is intended for application threads on a single core, not interrupts.
+    /// As such, only one task at a time can acquire a resource and so this
+    /// channel avoids all locks. To create one:
+    ///
+    /// ```
+    /// use embassy::util::mpsc;
+    ///
+    /// // Declare a bounded channel of 3 u32s.
+    /// let mut channel = mpsc::Channel::<u32, 3>::with_thread_mode_only();
+    /// // once we have a channel, obtain its sender and receiver
+    /// let (sender, receiver) = mpsc::split(&mut channel);
+    /// ```
+    pub const fn with_thread_mode_only() -> Self {
+        let mutex = ThreadModeMutex::new(UnsafeCell::new(ChannelState::new()));
+        Channel { mutex }
+    }
+}
+
+impl<M, T, const N: usize> Channel<M, T, N>
+where
+    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+{
+    fn try_recv(&mut self) -> Result<T, TryRecvError> {
+        self.mutex.lock(|state| {
+            let mut state = unsafe { state.get().read() };
+            if !state.closed {
+                if state.read_pos != state.write_pos || state.full {
+                    if state.full {
+                        state.full = false;
+                        // self.wake_senders(); FIXME
+                    }
+                    let message =
+                        unsafe { (state.buf[state.read_pos]).assume_init_mut().get().read() };
+                    state.read_pos = (state.read_pos + 1) % state.buf.len();
+                    Ok(message)
+                } else if !state.closing {
+                    Err(TryRecvError::Empty)
+                } else {
+                    state.closed = true;
+                    // self.wake_senders(); FIXME
+                    Err(TryRecvError::Closed)
                 }
-                let message = unsafe { (self.buf[self.read_pos]).assume_init_mut().get().read() };
-                self.read_pos = (self.read_pos + 1) % self.buf.len();
-                Ok(message)
-            } else if !self.closing {
-                Err(TryRecvError::Empty)
             } else {
-                self.closed = true;
-                self.wake_senders(cs);
                 Err(TryRecvError::Closed)
             }
-        } else {
-            Err(TryRecvError::Closed)
-        }
+        })
     }
 
-    fn try_send<'cs>(
-        &mut self,
-        message: T,
-        cs: CriticalSection<'cs>,
-    ) -> Result<(), TrySendError<T>> {
-        if !self.closed {
-            if !self.full {
-                self.buf[self.write_pos] = MaybeUninit::new(message.into());
-                self.write_pos = (self.write_pos + 1) % self.buf.len();
-                if self.write_pos == self.read_pos {
-                    self.full = true;
+    fn try_send(&mut self, message: T) -> Result<(), TrySendError<T>> {
+        self.mutex.lock(|state| {
+            let mut state = unsafe { state.get().read() };
+            if !state.closed {
+                if !state.full {
+                    state.buf[state.write_pos] = MaybeUninit::new(message.into());
+                    state.write_pos = (state.write_pos + 1) % state.buf.len();
+                    if state.write_pos == state.read_pos {
+                        state.full = true;
+                    }
+                    // self.wake_receiver(); FIXME
+                    Ok(())
+                } else {
+                    Err(TrySendError::Full(message))
                 }
-                self.wake_receiver(cs);
-                Ok(())
             } else {
-                Err(TrySendError::Full(message))
+                Err(TrySendError::Closed(message))
             }
-        } else {
-            Err(TrySendError::Closed(message))
-        }
+        })
     }
 
-    fn close<'cs>(&mut self, cs: CriticalSection<'cs>) {
-        self.wake_receiver(cs);
-        self.closing = true;
+    fn close(&mut self) {
+        self.wake_receiver();
+        self.mutex.lock(|state| {
+            let mut state = unsafe { state.get().read() };
+            state.closing = true;
+        });
     }
 
-    fn is_closed<'cs>(&mut self, _cs: CriticalSection<'cs>) -> bool {
-        self.closing || self.closed
+    fn is_closed(&mut self) -> bool {
+        self.mutex.lock(|state| {
+            let state = unsafe { state.get().read() };
+            state.closing || state.closed
+        })
     }
 
     fn register_receiver(&mut self) {
-        assert!(!self.receiver_registered);
-        self.receiver_registered = true;
+        self.mutex.lock(|state| {
+            let mut state = unsafe { state.get().read() };
+            assert!(!state.receiver_registered);
+            state.receiver_registered = true;
+        });
     }
 
-    fn deregister_receiver<'cs>(&mut self, cs: CriticalSection<'cs>) {
-        if self.receiver_registered {
-            self.closed = true;
-            self.wake_senders(cs);
-        }
-        self.receiver_registered = false;
+    fn deregister_receiver(&mut self) {
+        self.mutex.lock(|state| {
+            let mut state = unsafe { state.get().read() };
+            if state.receiver_registered {
+                state.closed = true;
+                // self.wake_senders(); FIXME
+            }
+            state.receiver_registered = false;
+        })
     }
 
-    fn register_sender<'cs>(&mut self, _cs: CriticalSection<'cs>) {
-        self.senders_registered = self.senders_registered + 1;
+    fn register_sender(&mut self) {
+        self.mutex.lock(|state| {
+            let mut state = unsafe { state.get().read() };
+            state.senders_registered = state.senders_registered + 1;
+        })
     }
 
-    fn deregister_sender<'cs>(&mut self, cs: CriticalSection<'cs>) {
-        assert!(self.senders_registered > 0);
-        self.senders_registered = self.senders_registered - 1;
-        if self.senders_registered == 0 {
-            self.close(cs);
-        }
+    fn deregister_sender(&mut self) {
+        self.mutex.lock(|state| {
+            let mut state = unsafe { state.get().read() };
+            assert!(state.senders_registered > 0);
+            state.senders_registered = state.senders_registered - 1;
+            if state.senders_registered == 0 {
+                // state.close(); //FIXME
+            }
+        })
     }
 
-    fn set_receiver_waker<'cs>(&mut self, _cs: CriticalSection<'cs>, receiver_waker: Waker) {
-        self.receiver_waker = Some(receiver_waker);
+    fn set_receiver_waker(&mut self, receiver_waker: Waker) {
+        self.mutex.lock(|state| {
+            let mut state = unsafe { state.get().read() };
+            state.receiver_waker = Some(receiver_waker);
+        })
     }
 
-    fn wake_receiver<'cs>(&mut self, _cs: CriticalSection<'cs>) {
-        if let Some(waker) = self.receiver_waker.clone() {
-            waker.wake();
-        }
-    }
-
-    fn set_senders_waker<'cs>(&mut self, _cs: CriticalSection<'cs>, senders_waker: Waker) {
-        // Dispose of any existing sender, causing them to poll again.
-        // This could cause a spin given multiple concurrent senders, however given that
-        // most sends only block waiting for the receiver to become active, this should
-        // be a short-lived activity. The upside is a greatly simplified implementation
-        // that avoids the need for intrusive linked-lists and unsafe operations on pinned
-        // pointers.
-        if let Some(waker) = self.senders_waker.clone() {
-            if !senders_waker.will_wake(&waker) {
-                trace!("Waking an an active send waker due to being superseded with a new one. While benign, please report this.");
+    fn wake_receiver(&mut self) {
+        self.mutex.lock(|state| {
+            let state = unsafe { state.get().read() };
+            if let Some(waker) = state.receiver_waker.clone() {
                 waker.wake();
             }
-        }
-        self.senders_waker = Some(senders_waker);
+        })
     }
 
-    fn wake_senders<'cs>(&mut self, _cs: CriticalSection<'cs>) {
-        if let Some(waker) = self.senders_waker.clone() {
-            waker.wake();
-            self.senders_waker = None;
-        }
+    fn set_senders_waker(&mut self, senders_waker: Waker) {
+        self.mutex.lock(|state| {
+            let mut state = unsafe { state.get().read() };
+
+            // Dispose of any existing sender, causing them to poll again.
+            // This could cause a spin given multiple concurrent senders, however given that
+            // most sends only block waiting for the receiver to become active, this should
+            // be a short-lived activity. The upside is a greatly simplified implementation
+            // that avoids the need for intrusive linked-lists and unsafe operations on pinned
+            // pointers.
+            if let Some(waker) = state.senders_waker.clone() {
+                if !senders_waker.will_wake(&waker) {
+                    trace!("Waking an an active send waker due to being superseded with a new one. While benign, please report this.");
+                    waker.wake();
+                }
+            }
+            state.senders_waker = Some(senders_waker);
+        })
+    }
+
+    fn wake_senders(&mut self) {
+        self.mutex.lock(|state| {
+            let mut state = unsafe { state.get().read() };
+            if let Some(waker) = state.senders_waker.clone() {
+                waker.wake();
+                state.senders_waker = None;
+            }
+        })
     }
 }
 
