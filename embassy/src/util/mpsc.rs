@@ -38,7 +38,6 @@
 //!
 //! This channel and its associated types were derived from https://docs.rs/tokio/0.1.22/tokio/sync/mpsc/fn.channel.html
 
-use core::borrow::BorrowMut;
 use core::cell::UnsafeCell;
 use core::fmt;
 use core::marker::PhantomData;
@@ -48,7 +47,6 @@ use core::task::Context;
 use core::task::Poll;
 use core::task::Waker;
 
-use critical_section::CriticalSection;
 use futures::Future;
 
 use super::CriticalSectionMutex;
@@ -60,42 +58,30 @@ use super::ThreadModeMutex;
 /// Instances are created by the [`channel`](channel) function.
 pub struct Sender<'ch, M, T, const N: usize>
 where
-    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+    M: Mutex<Data = ()>,
 {
     channel: *mut Channel<M, T, N>,
     phantom_data: &'ch PhantomData<T>,
 }
 
 // Safe to pass the sender around
-unsafe impl<'ch, M, T, const N: usize> Send for Sender<'ch, M, T, N> where
-    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>
-{
-}
-unsafe impl<'ch, M, T, const N: usize> Sync for Sender<'ch, M, T, N> where
-    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>
-{
-}
+unsafe impl<'ch, M, T, const N: usize> Send for Sender<'ch, M, T, N> where M: Mutex<Data = ()> {}
+unsafe impl<'ch, M, T, const N: usize> Sync for Sender<'ch, M, T, N> where M: Mutex<Data = ()> {}
 
 /// Receive values from the associated `Sender`.
 ///
 /// Instances are created by the [`channel`](channel) function.
 pub struct Receiver<'ch, M, T, const N: usize>
 where
-    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+    M: Mutex<Data = ()>,
 {
     channel: *mut Channel<M, T, N>,
     _phantom_data: &'ch PhantomData<T>,
 }
 
 // Safe to pass the receiver around
-unsafe impl<'ch, M, T, const N: usize> Send for Receiver<'ch, M, T, N> where
-    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>
-{
-}
-unsafe impl<'ch, M, T, const N: usize> Sync for Receiver<'ch, M, T, N> where
-    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>
-{
-}
+unsafe impl<'ch, M, T, const N: usize> Send for Receiver<'ch, M, T, N> where M: Mutex<Data = ()> {}
+unsafe impl<'ch, M, T, const N: usize> Sync for Receiver<'ch, M, T, N> where M: Mutex<Data = ()> {}
 
 /// Splits a bounded mpsc channel into a `Sender` and `Receiver`.
 ///
@@ -124,7 +110,7 @@ pub fn split<'ch, M, T, const N: usize>(
     channel: &'ch mut Channel<M, T, N>,
 ) -> (Sender<'ch, M, T, N>, Receiver<'ch, M, T, N>)
 where
-    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+    M: Mutex<Data = ()>,
 {
     let sender = Sender {
         channel,
@@ -141,7 +127,7 @@ where
 
 impl<'ch, M, T, const N: usize> Receiver<'ch, M, T, N>
 where
-    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+    M: Mutex<Data = ()>,
 {
     /// Receives the next value for this receiver.
     ///
@@ -188,7 +174,7 @@ where
 
 impl<'ch, M, T, const N: usize> Future for Receiver<'ch, M, T, N>
 where
-    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+    M: Mutex<Data = ()>,
 {
     type Output = Option<T>;
 
@@ -211,7 +197,7 @@ where
 
 impl<'ch, M, T, const N: usize> Drop for Receiver<'ch, M, T, N>
 where
-    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+    M: Mutex<Data = ()>,
 {
     fn drop(&mut self) {
         unsafe { self.channel.as_mut().unwrap().deregister_receiver() }
@@ -220,7 +206,7 @@ where
 
 impl<'ch, M, T, const N: usize> Sender<'ch, M, T, N>
 where
-    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+    M: Mutex<Data = ()>,
 {
     /// Sends a value, waiting until there is capacity.
     ///
@@ -296,7 +282,7 @@ where
 
 struct SendFuture<'ch, M, T, const N: usize>
 where
-    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+    M: Mutex<Data = ()>,
 {
     sender: Sender<'ch, M, T, N>,
     message: UnsafeCell<T>,
@@ -304,7 +290,7 @@ where
 
 impl<'ch, M, T, const N: usize> Future for SendFuture<'ch, M, T, N>
 where
-    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+    M: Mutex<Data = ()>,
 {
     type Output = Result<(), SendError<T>>;
 
@@ -331,14 +317,14 @@ where
 
 struct CloseFuture<'ch, M, T, const N: usize>
 where
-    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+    M: Mutex<Data = ()>,
 {
     sender: Sender<'ch, M, T, N>,
 }
 
 impl<'ch, M, T, const N: usize> Future for CloseFuture<'ch, M, T, N>
 where
-    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+    M: Mutex<Data = ()>,
 {
     type Output = ();
 
@@ -360,7 +346,7 @@ where
 
 impl<'ch, M, T, const N: usize> Drop for Sender<'ch, M, T, N>
 where
-    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+    M: Mutex<Data = ()>,
 {
     fn drop(&mut self) {
         unsafe { self.channel.as_mut().unwrap().deregister_sender() }
@@ -369,7 +355,7 @@ where
 
 impl<'ch, M, T, const N: usize> Clone for Sender<'ch, M, T, N>
 where
-    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+    M: Mutex<Data = ()>,
 {
     fn clone(&self) -> Self {
         unsafe { self.channel.as_mut().unwrap().register_sender() };
@@ -480,15 +466,15 @@ impl<T, const N: usize> ChannelState<T, N> {
 /// All data sent will become available in the same order as it was sent.
 pub struct Channel<M, T, const N: usize>
 where
-    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+    M: Mutex<Data = ()>,
 {
     mutex: M,
+    state: ChannelState<T, N>,
 }
 
-pub type WithCriticalSections<T, const N: usize> =
-    CriticalSectionMutex<UnsafeCell<ChannelState<T, N>>>;
+pub type WithCriticalSections = CriticalSectionMutex<()>;
 
-impl<T, const N: usize> Channel<CriticalSectionMutex<UnsafeCell<ChannelState<T, N>>>, T, N> {
+impl<T, const N: usize> Channel<WithCriticalSections, T, N> {
     /// Establish a new bounded channel using critical sections. Critical sections
     /// should be used only single core targets where communication is required
     /// from exception mode e.g. interrupt handlers. To create one:
@@ -502,14 +488,15 @@ impl<T, const N: usize> Channel<CriticalSectionMutex<UnsafeCell<ChannelState<T, 
     /// let (sender, receiver) = mpsc::split(&mut channel);
     /// ```
     pub const fn with_critical_sections() -> Self {
-        let mutex = CriticalSectionMutex::new(UnsafeCell::new(ChannelState::new()));
-        Channel { mutex }
+        let mutex = CriticalSectionMutex::new(());
+        let state = ChannelState::new();
+        Channel { mutex, state }
     }
 }
 
-pub type WithThreadModeOnly<T, const N: usize> = ThreadModeMutex<UnsafeCell<ChannelState<T, N>>>;
+pub type WithThreadModeOnly = ThreadModeMutex<()>;
 
-impl<T, const N: usize> Channel<ThreadModeMutex<UnsafeCell<ChannelState<T, N>>>, T, N> {
+impl<T, const N: usize> Channel<WithThreadModeOnly, T, N> {
     /// Establish a new bounded channel for use in Cortex-M thread mode. Thread
     /// mode is intended for application threads on a single core, not interrupts.
     /// As such, only one task at a time can acquire a resource and so this
@@ -524,23 +511,24 @@ impl<T, const N: usize> Channel<ThreadModeMutex<UnsafeCell<ChannelState<T, N>>>,
     /// let (sender, receiver) = mpsc::split(&mut channel);
     /// ```
     pub const fn with_thread_mode_only() -> Self {
-        let mutex = ThreadModeMutex::new(UnsafeCell::new(ChannelState::new()));
-        Channel { mutex }
+        let mutex = ThreadModeMutex::new(());
+        let state = ChannelState::new();
+        Channel { mutex, state }
     }
 }
 
 impl<M, T, const N: usize> Channel<M, T, N>
 where
-    M: Mutex<Data = UnsafeCell<ChannelState<T, N>>>,
+    M: Mutex<Data = ()>,
 {
     fn try_recv(&mut self) -> Result<T, TryRecvError> {
-        self.mutex.lock(|state| {
-            let mut state = unsafe { state.get().read() };
+        let state = &mut self.state;
+        self.mutex.lock(|_| {
             if !state.closed {
                 if state.read_pos != state.write_pos || state.full {
                     if state.full {
                         state.full = false;
-                        // self.wake_senders(); FIXME
+                        state.senders_waker.take().map(|w| w.wake());
                     }
                     let message =
                         unsafe { (state.buf[state.read_pos]).assume_init_mut().get().read() };
@@ -550,7 +538,7 @@ where
                     Err(TryRecvError::Empty)
                 } else {
                     state.closed = true;
-                    // self.wake_senders(); FIXME
+                    state.senders_waker.take().map(|w| w.wake());
                     Err(TryRecvError::Closed)
                 }
             } else {
@@ -560,8 +548,8 @@ where
     }
 
     fn try_send(&mut self, message: T) -> Result<(), TrySendError<T>> {
-        self.mutex.lock(|state| {
-            let mut state = unsafe { state.get().read() };
+        let state = &mut self.state;
+        self.mutex.lock(|_| {
             if !state.closed {
                 if !state.full {
                     state.buf[state.write_pos] = MaybeUninit::new(message.into());
@@ -569,7 +557,7 @@ where
                     if state.write_pos == state.read_pos {
                         state.full = true;
                     }
-                    // self.wake_receiver(); FIXME
+                    state.receiver_waker.take().map(|w| w.wake());
                     Ok(())
                 } else {
                     Err(TrySendError::Full(message))
@@ -581,76 +569,66 @@ where
     }
 
     fn close(&mut self) {
-        self.wake_receiver();
-        self.mutex.lock(|state| {
-            let mut state = unsafe { state.get().read() };
+        let state = &mut self.state;
+        self.mutex.lock(|_| {
+            state.receiver_waker.take().map(|w| w.wake());
             state.closing = true;
         });
     }
 
     fn is_closed(&mut self) -> bool {
-        self.mutex.lock(|state| {
-            let state = unsafe { state.get().read() };
-            state.closing || state.closed
-        })
+        let state = &self.state;
+        self.mutex.lock(|_| state.closing || state.closed)
     }
 
     fn register_receiver(&mut self) {
-        self.mutex.lock(|state| {
-            let mut state = unsafe { state.get().read() };
+        let state = &mut self.state;
+        self.mutex.lock(|_| {
             assert!(!state.receiver_registered);
             state.receiver_registered = true;
         });
     }
 
     fn deregister_receiver(&mut self) {
-        self.mutex.lock(|state| {
-            let mut state = unsafe { state.get().read() };
+        let state = &mut self.state;
+        self.mutex.lock(|_| {
             if state.receiver_registered {
                 state.closed = true;
-                // self.wake_senders(); FIXME
+                state.senders_waker.take().map(|w| w.wake());
             }
             state.receiver_registered = false;
         })
     }
 
     fn register_sender(&mut self) {
-        self.mutex.lock(|state| {
-            let mut state = unsafe { state.get().read() };
+        let state = &mut self.state;
+        self.mutex.lock(|_| {
             state.senders_registered = state.senders_registered + 1;
         })
     }
 
     fn deregister_sender(&mut self) {
-        self.mutex.lock(|state| {
-            let mut state = unsafe { state.get().read() };
+        let state = &mut self.state;
+        self.mutex.lock(|_| {
             assert!(state.senders_registered > 0);
             state.senders_registered = state.senders_registered - 1;
             if state.senders_registered == 0 {
-                // state.close(); //FIXME
+                state.receiver_waker.take().map(|w| w.wake());
+                state.closing = true;
             }
         })
     }
 
     fn set_receiver_waker(&mut self, receiver_waker: Waker) {
-        self.mutex.lock(|state| {
-            let mut state = unsafe { state.get().read() };
+        let state = &mut self.state;
+        self.mutex.lock(|_| {
             state.receiver_waker = Some(receiver_waker);
         })
     }
 
-    fn wake_receiver(&mut self) {
-        self.mutex.lock(|state| {
-            let state = unsafe { state.get().read() };
-            if let Some(waker) = state.receiver_waker.clone() {
-                waker.wake();
-            }
-        })
-    }
-
     fn set_senders_waker(&mut self, senders_waker: Waker) {
-        self.mutex.lock(|state| {
-            let mut state = unsafe { state.get().read() };
+        let state = &mut self.state;
+        self.mutex.lock(|_| {
 
             // Dispose of any existing sender, causing them to poll again.
             // This could cause a spin given multiple concurrent senders, however given that
@@ -665,16 +643,6 @@ where
                 }
             }
             state.senders_waker = Some(senders_waker);
-        })
-    }
-
-    fn wake_senders(&mut self) {
-        self.mutex.lock(|state| {
-            let mut state = unsafe { state.get().read() };
-            if let Some(waker) = state.senders_waker.clone() {
-                waker.wake();
-                state.senders_waker = None;
-            }
         })
     }
 }

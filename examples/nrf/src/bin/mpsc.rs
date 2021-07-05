@@ -11,23 +11,21 @@ mod example_common;
 use defmt::panic;
 use embassy::executor::Spawner;
 use embassy::time::{Duration, Timer};
-use embassy::util::{mpsc, Forever, ThreadModeMutex};
+use embassy::util::{mpsc, Forever};
 use embassy_nrf::gpio::{Level, Output, OutputDrive};
 use embassy_nrf::Peripherals;
 use embedded_hal::digital::v2::OutputPin;
+use mpsc::{Channel, Sender, WithThreadModeOnly};
 
 enum LedState {
     On,
     Off,
 }
 
-static CHANNEL: Forever<mpsc::Channel<mpsc::WithThreadModeOnly<LedState, 1>, LedState, 1>> =
-    Forever::new();
+static CHANNEL: Forever<Channel<WithThreadModeOnly, LedState, 1>> = Forever::new();
 
 #[embassy::task(pool_size = 1)]
-async fn my_task(
-    sender: mpsc::Sender<'static, mpsc::WithThreadModeOnly<LedState, 1>, LedState, 1>,
-) {
+async fn my_task(sender: Sender<'static, WithThreadModeOnly, LedState, 1>) {
     loop {
         let _ = sender.send(LedState::On).await;
         Timer::after(Duration::from_secs(1)).await;
@@ -40,7 +38,7 @@ async fn my_task(
 async fn main(spawner: Spawner, p: Peripherals) {
     let mut led = Output::new(p.P0_13, Level::Low, OutputDrive::Standard);
 
-    let channel = CHANNEL.put(mpsc::Channel::with_thread_mode_only());
+    let channel = CHANNEL.put(Channel::with_thread_mode_only());
     let (sender, mut receiver) = mpsc::split(channel);
 
     spawner.spawn(my_task(sender)).unwrap();
