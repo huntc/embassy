@@ -141,7 +141,7 @@ impl<'d, U: UarteInstance, T: TimerInstance> BufferedUarte<'d, U, T> {
         // We want to stop RX if line is idle for 2 bytes worth of time
         // That is 20 bits (each byte is 1 start bit + 8 data bits + 1 stop bit)
         // This gives us the amount of 16M ticks for 20 bits.
-        let timeout = 0x8000_0000 / (config.baudrate as u32 / 40) * 10;
+        let timeout = 0x8000_0000 / (config.baudrate as u32 / 40);
 
         timer.set_frequency(Frequency::F16MHz);
         timer.cc(0).write(timeout);
@@ -161,7 +161,7 @@ impl<'d, U: UarteInstance, T: TimerInstance> BufferedUarte<'d, U, T> {
             timer.cc(0).event_compare(),
             Task::from_reg(&r.tasks_stoprx),
         );
-        ppi_ch2.enable();
+        // ppi_ch2.enable();
 
         Self {
             inner: unsafe {
