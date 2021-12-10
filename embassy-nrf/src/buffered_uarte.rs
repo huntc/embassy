@@ -345,6 +345,8 @@ impl<'a, U: UarteInstance, T: TimerInstance> PeripheralState for StateInner<'a, 
                 RxState::Receiving => {
                     trace!("  irq_rx: in state receiving");
                     if r.events_endrx.read().bits() != 0 {
+                        self.timer.stop();
+
                         let n: usize = r.rxd.amount.read().amount().bits() as usize;
                         trace!("  irq_rx: endrx {:?}", n);
                         self.rx.push(n);
