@@ -159,7 +159,7 @@ impl<'d, U: UarteInstance, T: TimerInstance> BufferedUarte<'d, U, T> {
         let mut ppi_ch2 = Ppi::new_one_to_one(
             ppi_ch2.degrade(),
             timer.cc(0).event_compare(),
-            Task::from_reg(&r.tasks_stoprx),
+            Task::from_reg(&r.tasks_startrx),
         );
         ppi_ch2.enable();
 
