@@ -192,7 +192,7 @@ impl<'d, D: Driver<'d>> UsbDevice<'d, D> {
             let control_fut = self.control.setup();
             let bus_fut = self.inner.bus.poll();
             match select(bus_fut, control_fut).await {
-                Either::First(evt) => self.inner.handle_bus_event(evt).await,
+                Either::First(evt) => self.inner.handle_bus_event(evt),
                 Either::Second(req) => self.handle_control(req).await,
             }
         }
@@ -218,7 +218,7 @@ impl<'d, D: Driver<'d>> UsbDevice<'d, D> {
     pub async fn wait_resume(&mut self) {
         while self.inner.suspended {
             let evt = self.inner.bus.poll().await;
-            self.inner.handle_bus_event(evt).await;
+            self.inner.handle_bus_event(evt);
         }
     }
 
@@ -335,7 +335,7 @@ impl<'d, D: Driver<'d>> UsbDevice<'d, D> {
 }
 
 impl<'d, D: Driver<'d>> Inner<'d, D> {
-    async fn handle_bus_event(&mut self, evt: Event) {
+    fn handle_bus_event(&mut self, evt: Event) {
         match evt {
             Event::Reset => {
                 trace!("usb: reset");
@@ -372,7 +372,6 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
             }
             Event::PowerDetected => {
                 trace!("usb: power detected");
-                self.bus.enable().await;
                 self.device_state = UsbDeviceState::Default;
 
                 if let Some(h) = &self.handler {
@@ -381,7 +380,6 @@ impl<'d, D: Driver<'d>> Inner<'d, D> {
             }
             Event::PowerRemoved => {
                 trace!("usb: power removed");
-                self.bus.disable().await;
                 self.device_state = UsbDeviceState::Unpowered;
 
                 if let Some(h) = &self.handler {
